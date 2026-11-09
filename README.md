@@ -24,6 +24,7 @@
 8. [Documentation map](#8-documentation-map)
 9. [Limitations and open issues](#9-limitations-and-open-issues)
 10. [Citation and licence](#10-citation-and-licence)
+11. [Agent notes](#11-agent-notes)
 
 ---
 
@@ -348,20 +349,8 @@ The RTL and testbench in this repository are released under the licence in [LICE
 
 ---
 
-## 11. Development notes
+## 11. Agent notes
 
-### 11.1 Coding conventions
-
-* RTL is **Verilog-2001** only in `rtl/` (no SystemVerilog constructs) except the include-list files `design.sv` / `testbench.sv`-style tops, which exist purely as file lists. All RTL files carry the `// ===…===` header block with the module's contract; keep it accurate — it is the spec of record for that module.
-* Constants that are frozen by the spec live in `rtl/common/hysteroc.vh`; tunable thresholds are parameters (see §4). Never hard-code a frozen value in a module.
-* Every "ACCEPTED"-style policy in a header (e.g. `ready_in = (count != DEPTH)`) is a *decision* — record changes in [DECISIONS.md](DECISIONS.md) with the next number, and reference it from the code (the codebase already does: "DECISIONS 38" etc.).
-* Cycle-level timing in the UVM environment: drive after `@(posedge clk)` with non-blocking assignments, sample in the active region (see `tb/iface/hy_if.sv` header). `ej_ready` must never depend combinationally on `ej_valid`.
-* Commit hygiene: run `make lint` before committing; conventional-commit messages (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`) are appreciated because [CHANGELOG.md](CHANGELOG.md) is generated from them in the future.
-
-### 11.2 Contributing
-
-Pull requests that (a) keep `rtl/` synthesisable Verilog-2001, (b) update the module header and [DECISIONS.md](DECISIONS.md) when behaviour changes, and (c) add or extend a UVM test in `tb/tests/hy_tests_pkg.sv` for the change, are easy to review. For RTL behaviour changes, an exhaustive or formally-checked argument in the PR description (§2, §9 items above) carries more weight than test-only evidence.
-
-### 11.3 Acknowledgements
+This repo is maintained with AI agents. The operational conventions that agents must follow (branch discipline, frozen-value rules, `make lint && make docs` before committing, never commit to `main`) are in [AGENTS.md](AGENTS.md), which is the single source of truth for agent instructions — this section only points there.
 
 This is a research codebase with a long spec → RTL → UVM history (feature batches U1–U5+ in the UVM tree, RTL V6 spec v5). The structure of this repository — including the odd legacy names that remain (`hy_*` UVM classes, `hysteroc.vh`, the `V6` version stamps) — is kept deliberately so that the in-code spec references (`spec 6.4`, `DECISIONS 41`, …) stay resolvable. See [DECISIONS.md](DECISIONS.md) for the full lineage.
