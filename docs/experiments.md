@@ -6,7 +6,7 @@ This document defines the evaluation methodology for HYSTERoC. Follow this proto
 
 ## 1. Configuration points
 
-Evaluate the complete ablation matrix for all reported experimental data. The default configuration in `tb/env/test.sv` represents HYSTERoC (`DUAL=1, USE_EWMA=1, THIGH=160, TLOW=96`).
+Evaluate the complete ablation matrix for all reported experimental data. Note the distinction between defaults: `noc_top.v` defaults to `SWITCH_POLICY=0, DET_VARIANT=0, ADAPT_MARGIN=0`, whereas `tb/env/test.sv` and the v6 evaluation baseline use `SWITCH_POLICY=1, DET_VARIANT=2, ADAPT_MARGIN=2` (Point 1′). Always label reported tables with the exact RTL version, parameters, simulator, and seed count.
 
 | # | Name | `DUAL` | `USE_EWMA` | Thresholds | `SWITCH_POLICY` | Evaluation Purpose |
 |---|---|---|---|---|---|---|
@@ -69,7 +69,7 @@ Always calculate rate-relative values:
 
 ## 4. Statistical methodology
 
-* Execute each configuration with **at least three distinct random seeds**. Report mean values and error ranges.
+* Execute each configuration with **at least three distinct random seeds**. Report mean values and error ranges. Single-seed sweeps are preliminary and must be labelled as such.
 * Exclude the warmup period from all reported statistics. Measure only during the configured measurement window.
 * For oscillating workloads, log the congestion trajectories (`global_congestion` and `global_raw`) to show band crossings.
 
@@ -95,3 +95,52 @@ A successful experimental evaluation must show:
 2. **Predictable ablation trends**: Point 2 and Point 3 must perform between Point 1 and Point 4.
 3. **No-drain efficiency**: Point 1′ must eliminate drain delays while maintaining safe packet routing.
 4. **Safe timeout recovery**: The watchdog test must transition cleanly to `ERROR` without deadlock when sources stall.
+
+---
+
+## 7. Experimental results (simulation)
+
+This section summarizes simulation results collected under no-drain switching (`SWITCH_POLICY = 1`). Hardware synthesis results are not included here.
+
+### 7.1 Hysteresis vs. single-threshold EWMA (`hy_compare_test`, EDA Playground)
+
+* **Setup**: Cadence Xcelium 25.03, UVM 1.2, 7 Nov 2026 (v2 RTL). Both controllers use EWMA (`USE_EWMA = 1`): hysteresis (`160/96`) vs. single threshold (`128`). Load ramps `0.100 → 0.350 → 0.100` flits/node/cycle in `0.025` steps, 2,000 cycles per step (42,000 cycles).
+
+| Pattern | Seeds | Mode Changes: Single | Mode Changes: Hysteresis (Mean, Range) | Reduction | Accepted Throughput (Single / Hyst) | Mean Latency, Cycles (Single / Hyst) |
+|---|---:|---:|---|---:|---|---|
+| Uniform | 5 | 2,046 (49 / 1k cyc) | 596 (538–630; 14 / 1k cyc) | **3.4×** | 0.224 / 0.224 | 8.09 / 8.09 |
+| Transpose | 5 | 1,910 (45 / 1k cyc) | 690 (654–708; 16 / 1k cyc) | **2.8×** | 0.168 / 0.168 | 8.38 / 8.42 |
+| Hotspot | 3 | 319 (8 / 1k cyc) | 182 (179–184; 4 / 1k cyc) | **1.8×** | 0.148 / 0.148 | 39.45 / 39.39 |
+
+### 7.2 v6 fixed-load comparison (Verilator, 60,000 cycles)
+
+* **Setup**: v6 baseline (`SWITCH_POLICY = 1`, `DET_VARIANT = 2`, `ADAPT_MARGIN = 2`), comparing hysteresis (`160/96`), EWMA single threshold (`128`), and raw single threshold (`128`). Cases where all three controllers switch once and stay adaptive (hotspot, and load ≥ 0.60) are omitted.
+
+| Pattern | Load | Mode Changes (Raw / EWMA / Hyst) | Min Gap, Cycles (Raw / EWMA / Hyst) | Accepted Throughput | Mean Latency, Cycles (Raw / EWMA / Hyst) |
+|---|---:|---|---|---|---|
+| Uniform | 0.30 | 2,585 / 3,717 / 1,175 | 1 / 1 / 5 | 0.299 | 11.87 / 11.90 / 11.89 |
+| Uniform | 0.45 | 15 / 103 / 3 | 1 / 1 / 12 | 0.443 | 18.27 / 18.27 / 18.27 |
+| Transpose | 0.30 | 3,901 / 3,041 / 1,385 | 1 / 1 / 6 | 0.224 | 12.65 / 12.84 / 12.86 |
+| Transpose | 0.45 | 75 / 99 / 25 | 1 / 1 / 9 | 0.333 | 18.43 / 18.44 / 18.44 |
+| Complement | 0.30 | 515 / 1,086 / 206 | 1 / 1 / 7 | 0.299 | 15.44 / 15.44 / 15.44 |
+
+Across all 48 runs (4 patterns × 4 loads × 3 controllers), hysteresis cuts mode changes by **2.2–5×** vs. raw single threshold and **2.2–34×** vs. EWMA single threshold, with throughput within `0.004` flits/node/cycle, mean latency within `2%`, and `0` errors.
+
+### 7.3 Threshold sensitivity (preliminary, seed 1, `200–800` ramp)
+
+| Pattern | `160/96` Switches | `192/128` Switches | `224/160` Switches | Accepted Throughput |
+|---|---:|---:|---:|---|
+| Transpose | 228 | 224 | 126 (−45%) | 0.316 |
+| Complement | 134 | 87 | 60 (−55%) | 0.338–0.339 |
+| Bit-reversal | 248 | 256 | 172 (−31%) | 0.322–0.329 |
+
+Raising thresholds to `224/160` cuts mode changes by 31–55% with throughput within `0.01` flits/node/cycle and latency within `0.4` cycles; multi-seed tuning is still required.
+
+### 7.4 Simulation comparison with DyAD (indicative)
+
+Compared against published DyAD (Hu and Marculescu, DAC 2004: 6×6 mesh, 5-flit packets, C++ simulator), HYSTERoC v6 (4×4 mesh, 4-flit packets, Verilator, 60,000 cycles, saturation load `0.80` / low load `0.30`) is evaluated by each design's gain over its own XY baseline:
+* **Transpose (saturation)**: v6 gains **+28.5%** throughput (`0.340 → 0.437` flits/node/cycle) and **−20%** latency (`47.98 → 38.33` cycles); DyAD reports **+61.7%** throughput.
+* **Uniform (saturation)**: Both lose to XY (v6: **−8.0%** throughput, **+16%** latency).
+* **Hotspot (saturation)**: v6 loses **−4.3%** throughput (`+13%` latency), whereas DyAD reports a gain (open item).
+* **Complement (saturation)**: v6 matches XY throughput (`0.499`, `+9%` latency).
+* **Low-load latency**: Both match deterministic routing closely (v6: Uniform `+1.6%`, Complement `+3.6%`, Transpose `−21%`).

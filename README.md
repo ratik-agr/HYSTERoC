@@ -102,7 +102,7 @@ neighbour FIFO occupancy ── max ── mapped 0..255 ── EWMA filter ─�
 
 | Claim status | Statement |
 |---|---|
-| **Supported by design** | The controller eliminates ping-pong when the filtered congestion signal oscillates inside (`TLOW`, `THIGH`). Band crossings determine the number of switches, not signal noise. |
+| **Supported by design** | The controller eliminates ping-pong while the filtered congestion signal stays inside `(TLOW, THIGH)` and guarantees at least `4 × SAMPLE_PERIOD` cycles between switches. In simulation, hysteresis cuts mode changes by **1.8–3.4×** vs. single-threshold EWMA (`hy_compare_test`) and **2.2–5×** vs. raw single-threshold (v6 Verilator) at equal throughput and latency. |
 | **Baseline to compare** | Single-threshold control on raw congestion values (`DUAL=0, USE_EWMA=0, THRESH_SINGLE=128`). HYSTERoC must achieve fewer switches and fewer ping-pong events at equal or better latency and throughput. |
 | **Not claimed** | This repository does **not** provide a mathematical proof of end-to-end deadlock freedom for the full router. Deadlock safety relies on Chiu's Odd–Even turn model and channel-dependency analysis ([docs/architecture.md](docs/architecture.md) §3). |
 
@@ -187,7 +187,7 @@ Signals hold stable while stalled; ready does not depend combinationally on vali
 
 ## 4. Configuration matrix (one DUT, all ablation points)
 
-Top-level parameters of `noc_top`:
+Top-level parameters of `noc_top` (note: `noc_top.v` defaults to `SWITCH_POLICY=0, DET_VARIANT=0, ADAPT_MARGIN=0`, while the UVM testbench `tb/env/test.sv` and v6 no-drain evaluation baseline default to `SWITCH_POLICY=1, DET_VARIANT=2, ADAPT_MARGIN=2`):
 
 | Parameter | Default | Function |
 |---|---|---|
@@ -273,6 +273,12 @@ Refer to [docs/verification.md](docs/verification.md) for full details.
 ```
 
 Tests pass when `UVM_ERROR` and `UVM_FATAL` counts equal zero.
+
+### 6.3 Measured verification & simulation summary
+
+* **UVM regression (`SWITCH_POLICY = 1`)**: 12 of 12 applicable tests pass in Cadence Xcelium 25.03 (UVM 1.2) with `0 UVM_ERROR`, `0 UVM_FATAL`, `0` scoreboard errors, and `0` SVA failures (`hy_watchdog_test` is skipped under no-drain). See [docs/verification.md](docs/verification.md) §8.
+* **Block & deadlock checks**: All block-level unit tests pass with seeded mutants; RTL `route_select` produces `0` Odd–Even violations across 13.6M checked combinations, the RTL-derived dependency graph is acyclic (86 dependencies), and 18 forced-toggle stress runs complete with `0` errors.
+* **Ping-pong reduction**: Hysteresis (`160/96`) reduces mode changes by **1.8–3.4×** vs. single-threshold EWMA (`hy_compare_test`) and **2.2–5×** vs. raw single-threshold (v6 Verilator) at equal throughput and latency. See [docs/experiments.md](docs/experiments.md) §7.
 
 ---
 

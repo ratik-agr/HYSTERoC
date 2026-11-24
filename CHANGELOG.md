@@ -16,6 +16,7 @@ This document records the version history of the HYSTERoC project. Entries appea
   * Rewrote all repository documentation in 50% ASD-STE100 technical style.
   * Added `docs/faq.md` and `docs/glossary.md`.
   * Updated `README.md`, `docs/architecture.md`, `docs/verification.md`, `docs/experiments.md`, `docs/fpga.md`, and `DECISIONS.md`.
+  * Added UVM regression, block-level test, minimum-dwell, deadlock-check, and simulation comparison results to `docs/verification.md`, `docs/experiments.md`, and `README.md`.
   * Updated license to standard MIT License.
 - **Build and verification scripts**:
   * Maintained compile file lists in `sim/` (`hysteroc.f`, `hysteroc_bench.f`, `hysteroc_tb.f`).

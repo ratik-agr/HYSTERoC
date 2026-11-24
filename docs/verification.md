@@ -155,3 +155,54 @@ Before marking a configuration complete, confirm:
 - [ ] `hy_reset_test` and `hy_regress_test` complete successfully.
 - [ ] Functional coverage bins for modes, threshold bands, and patterns are covered.
 - [ ] Performance metrics match expected values in [docs/experiments.md](experiments.md).
+
+---
+
+## 8. Verification results
+
+This section records observed simulation and static verification results. Hardware synthesis results are tracked separately.
+
+### 8.1 UVM regression (`SWITCH_POLICY = 1`, EDA Playground)
+
+* **Tool**: Cadence Xcelium 25.03, UVM 1.2, seed 1, run on 6 Nov 2026 (v2 RTL).
+* **Configuration**: `SWITCH_POLICY = 1` (no-drain), `THIGH = 160`, `TLOW = 96`.
+* **Summary**: 12 of 12 applicable tests passed (`0 UVM_ERROR`, `0 UVM_FATAL`, `0` scoreboard errors, `0` SVA failures). Minimum latency excess over the zero-load bound (`distance + 4`) was 0 across all runs.
+
+| Test | Packets Injected | Packets Delivered | Mode Changes | Result | Notes |
+|---|---:|---:|---:|---|---|
+| `hy_nodrain_test` | 5,405 | 5,405 | 36 | PASS | Alternating heavy/light load; 0 packets lost |
+| `hy_smoke_test` | 1 | 1 | 0 | PASS | Basic end-to-end path |
+| `hy_zero_load_test` | 4 | 4 | 0 | PASS | Matches zero-load latency floor |
+| `hy_all_pairs_test` | 480 | 480 | 2 | PASS | Covers all 240 source–destination flows |
+| `hy_uniform_test` | 1,985 | 1,985 | 2 | PASS | Uniform traffic delivered intact |
+| `hy_hotspot_test` | 2,009 | 2,009 | 88 | PASS | Intact delivery under 88 mode switches |
+| `hy_transpose_test` | 1,550 | 1,550 | 0 | PASS | Deterministic mode at this load |
+| `hy_bubble_test` | 2,319 | 2,319 | 146 | PASS | Sink stalls handled across 146 switches |
+| `hy_backpressure_test` | 3,246 | 3,246 | 44 | PASS | Dynamic backpressure across 44 switches |
+| `hy_reset_test` | 4,341 | 4,331 | 56 | PASS | 10 in-flight packets flushed by reset (by design) |
+| `hy_regress_test` | 21,044 | 21,044 | 426 | PASS | Largest run; 426 switches, 0 errors |
+| `hy_watchdog_test` | — | — | — | Skipped | Not applicable under `SWITCH_POLICY = 1` (no drain) |
+
+* **Notes**: One testbench checker bug found during these runs (latency floor assumed 4-flit packets only) was fixed in the testbench without RTL changes. Functional coverage is implemented in `hy_coverage.svh` but was not collected in these runs.
+
+### 8.2 Block-level tests (Icarus Verilog and Verilator)
+
+Self-checking unit tests with seeded mutants pass across all RTL blocks:
+* **Datapath & control**: `input_fifo`, `ewma_filter`, `congestion_estimator`, `hysteresis_controller`, `round_robin_arbiter`, `packet_tracker`, `switch_allocator`, `crossbar`, `drain_detector`, `transition_controller`.
+* **Routing**: `route_compute` matches the Python reference model on all 1,024 input combinations; `route_select` passes 336,922 test cases with 7 of 7 seeded mutants killed.
+* **Bench**: `traffic_generator` and `packet_sink` kill 21 mutants; `performance_monitor` kills 17 of 18 mutants (1 equivalent).
+
+### 8.3 Minimum dwell and deadlock-freedom evidence (v6 baseline)
+
+Results below use the v6 no-drain baseline (`SWITCH_POLICY = 1`, `DET_VARIANT = 2`, `ADAPT_MARGIN = 2`) in Verilator:
+
+* **Minimum time between mode changes**: Exhaustive search over the EWMA and hysteresis state machine proves the mode cannot change twice within `4 × SAMPLE_PERIOD` cycles (4 cycles at `SAMPLE_PERIOD = 1`; tight bound). Single-threshold control has a 1-cycle minimum gap.
+* **Observed switching gaps (100,000 cycles, offered load 0.45 flits/node/cycle)**:
+  * *Uniform*: Hysteresis (`160/96`) = 7 switches, min gap **6 cycles**; EWMA single-threshold (`128`) = 171 switches, min gap **1 cycle**; raw single-threshold (`128`) = 33 switches, min gap **1 cycle**.
+  * *Transpose*: Hysteresis (`160/96`) = 43 switches, min gap **8 cycles**; EWMA single-threshold (`128`) = 143 switches, min gap **1 cycle**; raw single-threshold (`128`) = 123 switches, min gap **1 cycle**.
+* **Channel-dependency & RTL route checks**:
+  * Python model (240 pairs): XY alone has 68 dependencies (acyclic); Odd–Even alone has 86 dependencies (acyclic, 0 forbidden turns); plain XY + Odd–Even mixed has 92 dependencies with a cycle (explaining why `SWITCH_POLICY = 0` drains and `SWITCH_POLICY = 1` uses Odd–Even-compatible deterministic modes).
+  * RTL `route_select` check: 13,639,680 combinations of position, source, destination, mode, neighbour occupancy (sampled with stride 37), and availability produced **0 violations** outside Odd–Even candidates.
+  * RTL-derived dependency graph (240 pairs): 86 dependencies, **acyclic**, 0 moves off-mesh.
+* **Forced mode-toggle stress**: 18 runs (3 patterns × 2 loads × 60,000 cycles) forcing random mode toggles every `K = 1, 3, 16` cycles produced **0** protocol, allocation, destination, order, or integrity errors (max zero-ejection stretch: 5–8 cycles).
+* **Scope limit**: This evidence covers the routing function under wormhole switching, finite buffers, and always-accepting sinks; it is not a formal whole-router proof.
