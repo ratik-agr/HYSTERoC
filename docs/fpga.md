@@ -1,41 +1,64 @@
-# FPGA integration notes
+# FPGA Integration Guidelines
 
-`noc_top` and its router/control submodules are synthesisable Verilog-2001 with no vendor primitives, no latches and no SystemVerilog constructs in `rtl/` (the include lists are `.sv` file shells only). The FPGA top is **not** in this repository; this document is the integration path.
+The modules in `rtl/router/`, `rtl/control/`, and `rtl/top/` use synthesizable Verilog-2001. They contain no vendor-specific primitives, no latches, and no SystemVerilog extensions.
 
-## 1. What to synthesise and what to replace
+This document describes how to integrate the design into an FPGA target.
 
-| Synthesise | Replace |
+---
+
+## 1. Synthesizable modules and simulation replacements
+
+| Include in Synthesis | Exclude from Synthesis |
 |---|---|
-| `rtl/router/*`, `rtl/control/*`, `rtl/top/noc_top.v`, `rtl/common/hysteroc.vh` | the sources/sinks: `rtl/bench/traffic_generator.v`, `rtl/bench/packet_sink.v` |
-| | the observer: `rtl/bench/performance_monitor.v` (keep it for bring-up; remove or `ENABLE_STATS`-gate it for the overhead comparison) |
+| `rtl/router/*` | `rtl/bench/traffic_generator.v` (replace with hardware sources) |
+| `rtl/control/*` | `rtl/bench/packet_sink.v` (replace with hardware sinks) |
+| `rtl/top/noc_top.v` | `rtl/bench/performance_monitor.v` (optional bring-up observer) |
+| `rtl/common/hysteroc.vh` | |
 
-## 2. Resource shape (expectations)
+---
 
-* The fabric cost is dominated by 16 routers × (5 FIFOs + 5× `packet_tracker` + 5× `route_compute` + 5× `route_select` + 5× arbiter + crossbar). The FIFOs are the only candidates for BRAM: depth 4 × 18 bit is small enough to map to distributed RAM or LUTs — **do not** burn a block RAM per FIFO without measuring; 80 FIFOs × 1 BRAM is not viable on most parts.
-* `ENABLE_STATS = 0` removes all thirteen 32-bit transition counters and stamps (tens of flip-flops × 13). Use it for the FPGA overhead number and keep it at 1 for simulation runs.
-* `SAMPLE_PERIOD = 1` (default) synthesises the EWMA update every cycle with **no** period counter (16 flip-flops/router saved per router).
-* Thresholds are `parameter`s, so the comparators fold to constants — the hysteresis controller is a handful of gates once synthesised.
+## 2. Resource usage guidelines
 
-## 3. Timing
+* **Input FIFOs**: The 16 routers contain 80 FIFOs total. Each FIFO has a depth of 4 and a width of 18 bits. Map these FIFOs to distributed LUT RAM or shift registers. Do not allocate block RAM (BRAM) for these shallow FIFOs.
+* **Transition Statistics**: Setting parameter `ENABLE_STATS = 0` removes thirteen 32-bit registers. Disable stats to evaluate core hardware resource overhead.
+* **Filter Logic**: With default parameter `SAMPLE_PERIOD = 1`, the EWMA filter updates every clock cycle without requiring a period counter. This eliminates 16 flip-flops per router.
+* **Comparators**: Threshold values (`THIGH`, `TLOW`) are parameters. Synthesis tools optimize comparators into simple logic gates.
 
-The neighbour-occupancy sideband is registered once per router (`occ_q`), so the occupancy comparison fan-in does not sit on the input-to-register path. The global max-of-16 tree (`global_congestion`/`global_raw`) is a single combinational reduction feeding one hysteresis comparator — closure on a single clock is expected at NoC-local frequencies; the transition FSM is a 7-state controller whose transitions are all register-to-register. If `global_congestion` becomes critical at high frequency, register `max16` outputs once (the EWMA/`enable` freeze semantics already tolerate an extra cycle of the request signal? — **no**: document any such change in [DECISIONS.md](../DECISIONS.md) first, because `hy_model` is cycle-exact).
+---
 
-## 4. Constraints stub
+## 3. Timing and critical paths
 
-A minimal Xilinx-style constraints skeleton (adjust clock period and pin names to your board):
+The design registers neighbour FIFO occupancies (`occ_q`) in each router. This isolates the neighbour comparison fan-in from input arrival paths.
+
+The global maximum calculation (`global_congestion`) connects 16 values through a combinational comparator tree to the hysteresis controller. This logic meets timing at typical FPGA NoC clock frequencies.
+
+The transition FSM uses registered state transitions. If high clock frequencies require extra pipelining on global signals, register the outputs of `max16` after updating the cycle-exact model in `tb/env/hy_model.svh`.
+
+---
+
+## 4. Constraints template
+
+Sample constraints file for a Xilinx design flow:
 
 ```tcl
+# System clock constraint (100 MHz target)
 create_clock -period 10.000 -name sysclk [get_ports clk]
+
+# Pin assignments (adjust to match board schematic)
 set_property PACKAGE_PIN <CLK_PIN> [get_ports clk]
 set_property PACKAGE_PIN <RSTN_PIN> [get_ports rst_n]
-# 16 local data/type/valid/ready ports: 16x18 bits + handshake.
-# Consider an Ethernet-AXI-Stream / custom serdes wrapper for the 16 local ports
-# instead of direct pins on large meshes.
+
+# False paths for asynchronous reset
 set_false_path -from [get_ports rst_n]
 ```
 
-## 5. Bring-up order
+For large meshes, connect the 16 local injection and ejection interfaces to internal processing elements or AXI-Stream converters instead of external FPGA pins.
 
-1. Synthesise `noc_top` alone, then `+ performance_monitor` + a `traffic_generator`/`packet_sink` wrapper. Run the UVM tests on the same parameterisation in simulation *first* (the `hy_model` is cycle-exact and will catch integration mis-wires in one cycle).
-2. Check the mesh wiring again against the direction rule (out-N → in-S, …) — the `noc_top` header is the reference.
-3. Confirm the mode never changes with traffic in flight under `SWITCH_POLICY=0` (the SVA `a_mode_change_only_after_switch` exists for exactly this), then move to the no-drain point.
+---
+
+## 5. Bring-up procedure
+
+1. Synthesise `noc_top.v` with testbench wrappers. Validate identical parameters in simulation first using `./scripts/run_uvm.sh`.
+2. Verify all mesh link connections. Output North connects to input South of the adjacent router.
+3. Validate mode switching using `SWITCH_POLICY = 0`. Confirm that the network drains completely before mode updates occur.
+4. Test the direct switching variant using `SWITCH_POLICY = 1` for lower latency.

@@ -1,29 +1,35 @@
-# Verification — HYSTERoC UVM testbench
+# Verification — HYSTERoC UVM Testbench
 
-The testbench is UVM 1.2, SystemVerilog, simulator-portable (no vendor extensions except the tool-provided `uvm_pkg`/`uvm_macros.svh`). It verifies `noc_top` in the *full* 4×4 mesh with real injection/ejection agents — there are no stub unit tests in this repo (per-block testbenches existed upstream of the snapshot and were superseded by the environment-level model below).
-
----
-
-## 1. The `hy_if` contract (timing rule)
-
-**One rule, observed by every component:** *drive with non-blocking assignments right after `@(posedge clk)`; sample in the active region of `@(posedge clk)`.* Samples then equal what the DUT flip-flops see at that edge — no clocking blocks, no simulator-specific sampling semantics.
-
-The transition-protocol sources are modelled **inside the interface** so that 16 independent drivers can own one bit each (`tb/iface/hy_if.sv`):
-
-```
-src_empty[n]        = !(src_busy[n] | src_force_busy[n])
-inject_block_ack[n] = inject_block_req & src_empty[n]
-```
-
-* `src_busy[n]` is set by node n's inject driver while a started packet is not yet fully accepted.
-* `src_force_busy[n]` is a test knob: a source that never acknowledges (used to provoke the watchdog; `hy_watchdog_test`).
-* Mid-run reset: the testbench top builds `assign rst_n = por_n & vif.test_rst_n`; a test pulls `test_rst_n` low for a few cycles (`hy_reset_test`).
-
-`ej_ready` must never depend combinationally on `ej_valid` (DECISIONS 38); the `hy_sink_driver` implements always / random / bursty / never modes with a **registered** random bit.
+This document describes the UVM 1.2 verification environment for the HYSTERoC network-on-chip. The testbench verifies `noc_top` across the complete 4×4 mesh with active injection and ejection agents.
 
 ---
 
-## 2. Running one test
+## 1. Interface timing contract (`hy_if`)
+
+All testbench components must follow this timing rule:
+* Drive signals using non-blocking assignments (`<=`) immediately after `@(posedge clk)`.
+* Sample signals in the active region of `@(posedge clk)`.
+
+This rule matches what registers capture on each clock edge. It prevents race conditions across different simulators.
+
+The interface model defines node status signals:
+
+```systemverilog
+src_empty[n]        = !(src_busy[n] | src_force_busy[n]);
+inject_block_ack[n] = inject_block_req & src_empty[n];
+```
+
+* `src_busy[n]`: Asserted by inject driver while a packet is transferring.
+* `src_force_busy[n]`: Testbench control bit. Prevents acknowledgment to trigger the watchdog timer (`hy_watchdog_test`).
+* `test_rst_n`: Testbench control bit for mid-test resets (`hy_reset_test`).
+
+Ejection ready (`ej_ready`) must not depend combinationally on `ej_valid`. The sink driver uses registered random logic.
+
+---
+
+## 2. Running tests
+
+Execute test scripts with VCS, Xcelium, or Questa:
 
 ```bash
 ./scripts/run_uvm.sh --sim vcs   --test hy_smoke_test
@@ -31,126 +37,121 @@ inject_block_ack[n] = inject_block_req & src_empty[n]
 ./scripts/run_uvm.sh --sim questa --test hy_nodrain_test --policy 1 --det 1
 ```
 
-| Argument | Meaning |
+Common command-line arguments:
+
+| Argument | Description |
 |---|---|
-| `--test <name>` | UVM test name (`+UVM_TESTNAME=`), see §5 for the catalogue |
-| `--policy 0\|1` | `SWITCH_POLICY` (0 drain-and-switch, 1 no-drain) |
-| `--det 0\|1\|2` | `DET_VARIANT` (no-drain: `oe_fixed` / `oe_par` / `oe_x21`) |
-| `--thigh/--tlow/--dual/--ewma/--xy-only` | hysteresis point (default: HYSTERoC 160/96 dual/EWMA) |
-| `--load/--cycles/--pat` | workload plusargs `+HY_LOAD=/+HY_CYCLES=/+HY_PAT=` |
-| `--timeout <n>` | `+HY_TIMEOUT=` hard stop in cycles (default 3 000 000) |
-| `--campaign` | run the full test catalogue and summarise PASS/FAIL per test |
+| `--test <name>` | Selects test name (`+UVM_TESTNAME=`). See §5. |
+| `--policy 0\|1` | Selects `SWITCH_POLICY` (0 = drain-and-switch, 1 = no-drain). |
+| `--det 0\|1\|2` | Selects `DET_VARIANT` (0 = `oe_fixed`, 1 = `oe_par`, 2 = `oe_x21`). |
+| `--thigh <val>` | Sets high hysteresis threshold (default: 160). |
+| `--tlow <val>` | Sets low hysteresis threshold (default: 96). |
+| `--dual 0\|1` | Enables or disables dual-threshold mode. |
+| `--ewma 0\|1` | Enables or disables EWMA filter. |
+| `--load <val>` | Sets offered load in flits/node/cycle × 1000 (`+HY_LOAD=`). |
+| `--cycles <val>`| Sets duration in clock cycles (`+HY_CYCLES=`). |
+| `--timeout <val>`| Sets maximum cycles before test abort (default: 3,000,000). |
+| `--campaign` | Executes all tests in sequence and reports status. |
 
-**Pass criterion:** the UVM report server severity count (`UVM_ERROR + UVM_FATAL = 0`) ⇒ `*** HYSTERoC TEST PASSED ***`. Hard timeouts are enforced by a forked watcher in `hy_base_test.run_phase`.
-
-**DUT parameterisation:** `tb/env/test.sv` exposes every `noc_top` parameter as a top-level parameter and echoes it into the test via `uvm_config_db`, so *one compiled snapshot* can be re-elaborated per point (e.g. `xrun -generic_top`). `hy_cfg` carries the echo plus the checker switches (`chk_scoreboard`, `chk_route`, `chk_protocol`, `chk_latency`, `chk_models`, `cov_en`, `expect_drain_timeout`, `require_inflight_switch`).
-
-### 2.1 Workload plusargs (honoured by most workload tests)
-
-```
-+HY_LOAD=<pm>      offered load, flits/node/cycle × 1000    (e.g. 400 = 0.4 flits/node/cycle)
-+HY_CYCLES=<n>     cycles per phase
-+HY_PAT=<n>        0 uniform  1 hotspot  2 transpose  3 complement  4 neighbour  5 bit-rev
-+HY_ALLPAIRS=1     zero-load test over all 240 flows
-+HY_TIMEOUT=<n>    hard stop in cycles (default 3 000 000)
-+HY_LO/HY_HI/HY_STEP/HY_DWELL   hy_compare_test load sweep
-```
+Pass criteria: Test completes with `UVM_ERROR = 0` and `UVM_FATAL = 0`.
 
 ---
 
-## 3. Environment blocks
+## 3. Testbench components
 
-| File | Class | Role |
+| File | Class / Scope | Function |
 |---|---|---|
-| `tb/iface/hy_if.sv` | `hy_if` | DUT-facing interface (§1). Also exposes the router-output taps (`link_out_*`) for the hop monitor and `sva_errors` for the protocol checker's report phase |
-| `tb/pkg/hy_types.svh` | — (pure functions) | network constants, `hy_flit_t`, ready-mode enums, header build/parse helpers; no UVM → unit-testable alone |
-| `tb/pkg/hy_item.svh` | `hy_item` | the driven transaction (packet descriptor) |
-| `tb/pkg/hy_cfg.svh` | `hy_cfg` | config object (§2): per-node sink modes, bubble percentages, DUT echo, checker switches |
-| `tb/pkg/hy_route.svh` | — | UVM-side route references (mirrors `route_compute`, including the `oe_*` variants) |
-| `tb/env/hy_sb_core.svh` | `hy_sb_core`, `hy_pkt_rec` | scoreboard core: packet reassembly, per-flow queueing, integrity and ordering bookkeeping |
-| `tb/pkg/hy_traffic.svh` | — | traffic-pattern helpers (uniform/hotspot/transpose/…) |
-| `tb/env/hy_model.svh` | `hy_model` | **the** cycle-exact reference model of the whole control path — EWMA, hysteresis, FSM, drain detector, statistics — fed with the *observed* DUT inputs, outputs compared every cycle |
-| `tb/pkg/hy_sequencer.svh` | `hy_vseqr` | virtual sequencer (runs the virtual sequences) |
-| `tb/agents/hy_inject_driver.svh` | `hy_inject_driver` | 16 flit-exact injection drivers; models source bubbles and the busy/ack bits |
-| `tb/agents/hy_monitors.svh` | `hy_inject_monitor`, `hy_eject_monitor` | per-port monitors (accepted flits, ejection events) |
-| `tb/agents/hy_sink_driver.svh` | `hy_sink_driver` | per-node ready drivers (registered random, bursty or never) |
-| `tb/agents/hy_hop_monitor.svh` | `hy_hop_monitor` | hop-level observer on `link_out_*`: every flit hop is checked against the **legal-output set** for the mode observed in that cycle (including the no-drain `oe_*` variants) |
-| `tb/env/hy_scoreboard.svh` | `hy_scoreboard` | delivery exactly once, right node, right content (integrity word), per-source order |
-| `tb/env/hy_protocol_checker.svh` | `hy_protocol_checker` | deep protocol rules (mode-change legality, drain/timeout invariants, in-flight switch requirement for `hy_nodrain_test`) + the `sva_errors` report |
-| `tb/env/hy_coverage.svh` | `hy_coverage` | functional coverage: mode × threshold-band × pattern |
-| `tb/agents/hy_agents.svh` | `hy_inject_agent`, `hy_eject_agent` | agent wrappers |
-| `tb/env/hy_env.svh` | `hy_env` | instantiates agents/checkers/model, wires TLM analysis ports |
-| `tb/env/hy_sva.sv` | `hy_sva` | concurrent assertions on `hy_if` (§4) |
-| `tb/env/test.sv` | `test` | testbench top: clock (100 MHz `#5`), POR, DUT, SVA, `uvm_config_db`, `run_test()` |
-| `tb/env/testbench.sv` | — | include list (compile order) |
-
-Sequences (`tb/seq/`): `hy_item_seq` (packet item), `hy_traffic_seq` (random traffic), `hy_load_ctl`; virtual sequences in `hy_vseq_lib.svh` (`hy_vseq_single`, `hy_vseq_zero_load`, `hy_vseq_all_pairs`, `hy_vseq_flow`, `hy_vseq_pattern/uniform/hotspot/transpose`, `hy_vseq_phased`, `hy_vseq_oscillate`, `hy_vseq_patterns_all`, `hy_vseq_lengths`, `hy_vseq_loopback`, `hy_vseq_backpressure`, `hy_vseq_watchdog`, `hy_vseq_reset`, `hy_vseq_compare`).
+| `tb/iface/hy_if.sv` | `hy_if` | Physical interface to DUT. Exposes links and error signals. |
+| `tb/pkg/hy_types.svh` | Functions | Constants, flit definitions, and header conversion functions. |
+| `tb/pkg/hy_item.svh` | `hy_item` | Sequence item representing network packets. |
+| `tb/pkg/hy_cfg.svh` | `hy_cfg` | Configuration object for sink modes, knobs, and checks. |
+| `tb/pkg/hy_route.svh` | Functions | Golden routing calculation functions for testbench checks. |
+| `tb/env/hy_sb_core.svh` | `hy_sb_core` | Core reassembly, ordering checks, and packet verification. |
+| `tb/pkg/hy_traffic.svh` | Functions | Helper routines to generate traffic patterns. |
+| `tb/env/hy_model.svh` | `hy_model` | Cycle-exact reference model for all control registers and logic. |
+| `tb/pkg/hy_sequencer.svh` | `hy_vseqr` | Virtual sequencer executing virtual sequences. |
+| `tb/agents/hy_inject_driver.svh` | `hy_inject_driver` | Injects flits into the 16 router input ports. |
+| `tb/agents/hy_monitors.svh` | Monitors | Monitors packet transfers at injection and ejection ports. |
+| `tb/agents/hy_sink_driver.svh` | `hy_sink_driver` | Controls `ej_ready` with random, burst, or continuous readiness. |
+| `tb/agents/hy_hop_monitor.svh` | `hy_hop_monitor` | Monitors router links. Validates hop legality against turn rules. |
+| `tb/env/hy_scoreboard.svh` | `hy_scoreboard` | Validates delivery count, destination, order, and checksum. |
+| `tb/env/hy_protocol_checker.svh` | `hy_protocol_checker` | Validates transition rules, drain invariants, and timeouts. |
+| `tb/env/hy_coverage.svh` | `hy_coverage` | Functional coverage for modes, thresholds, and patterns. |
+| `tb/agents/hy_agents.svh` | Agents | UVM agent wrappers for drivers and monitors. |
+| `tb/env/hy_sva.sv` | `hy_sva` | Concurrent SystemVerilog assertions for interface rules. |
+| `tb/env/test.sv` | Module | Testbench top module: clock, reset, DUT, and configuration. |
 
 ---
 
-## 4. Assertion catalogue (`hy_sva`)
+## 4. Concurrent assertions (`hy_sva`)
 
-Stateless / short-history properties only; the deep checks live in `hy_model` + `hy_protocol_checker`. A failure increments `vif.sva_errors` (UVM does not count SVA `$error`s itself) and is reported in the check phase. `SWITCH_POLICY` selects the rule set at elaboration:
+Assertions verify protocol rules during simulation. Failures increment `vif.sva_errors`.
 
-| Assertion | Rule |
+| Assertion | Policy | Verified Invariant |
+|---|---|---|
+| `a_blk_implies_busy` | Both | `inject_block_req` implies `transition_busy`. |
+| `a_state_legal` | Both | FSM state does not equal invalid state 7. |
+| `a_timeout_is_error` | Both | `drain_timeout` is asserted if and only if state is `ERROR`. |
+| `a_mode_change_only_after_switch` | 0 | `active_mode` changes only in `SWITCH` state when drained. |
+| `a_mode_change_sources_idle` | 0 | Mode changes only when all sources are idle. |
+| `a_start_only_from_run` | 0 | Transitions begin only from `RUN` when request differs from active. |
+| `a_block_rises_from_run` | 0 | Injection block asserts only from `RUN`. |
+| `a_release_in_resume` | 0 | Injection block deasserts only in `RESUME`. |
+| `a_error_sticky` | 0 | `ERROR` state persists until system reset. |
+| `a_no_inject_in_drain_switch` | 0 | Injection `valid` remains zero during `DRAIN` and `SWITCH`. |
+| `a_nd_run_only` | 1 | No-drain mode remains in `RUN`. Block and timeout stay low. |
+| `a_nd_mode_follows_req` | 1 | No-drain mode updates `active_mode` one cycle after request. |
+| `a_drained_means_empty` | Both | `network_drained` implies all FIFOs and sources are empty. |
+| `a_no_internal_errors` | Both | Internal protocol and allocation errors stay zero. |
+| `a_no_x_control` | Both | Control and handshake signals contain no X or Z values. |
+| `a_ej_hold` | Both | Ejection outputs hold data until accepted by the receiver. |
+
+---
+
+## 5. Test suite catalogue
+
+| Test Name | Description |
 |---|---|
-| `a_blk_implies_busy` | `inject_block_req → transition_busy` |
-| `a_state_legal` | `ctrl_state ≠ 7` |
-| `a_timeout_is_error` | `drain_timeout ≡ (state == ERROR)` |
-| `a_mode_change_only_after_switch` *(policy 0)* | `active_mode` changed only in a SWITCH cycle with `network_drained` |
-| `a_mode_change_sources_idle` *(0)* | `active_mode` changed only with all sources empty |
-| `a_start_only_from_run` *(0)* | `transition_busy` rose only from RUN with `req_mode != active_mode` |
-| `a_block_rises_from_run` *(0)* | `inject_block_req` rose only from RUN |
-| `a_release_in_resume` *(0)* | `inject_block_req` fell only in RESUME |
-| `a_error_sticky` *(0)* | `ERROR → ERROR` (until reset) |
-| `a_no_inject_in_drain_switch` *(0)* | `inj_valid == 0` during DRAIN or SWITCH |
-| `a_nd_run_only` *(1)* | no-drain: `ctrl_state == RUN`, block/busy/timeout never asserted |
-| `a_nd_mode_follows_req` *(1)* | no-drain: `active_mode == $past(req_mode)` |
-| `a_drained_means_empty` *(both)* | `network_drained → (&router_empty && &src_empty)` |
-| `a_no_internal_errors` *(both)* | `!proto_err_any && !alloc_err_any` |
-| `a_no_x_control` *(both)* | no X/Z on control and handshake outputs |
-| `a_ej_hold` *(both, ×16)* | a stalled ejection output holds data/type until accepted |
+| `hy_smoke_test` | Sends one packet from node 0 to node 15. |
+| `hy_zero_load_test` | Verifies latency equals `distance + 4` in an empty mesh. |
+| `hy_all_pairs_test` | Sends packets across all 240 source-destination pairs. |
+| `hy_flow_test` | Transmits 200 packets along a single flow to verify ordering. |
+| `hy_uniform_test` | Evaluates uniform random traffic under specified load. |
+| `hy_hotspot_test` | Evaluates traffic directed toward a single node. |
+| `hy_transpose_test` | Evaluates matrix transpose traffic pattern. |
+| `hy_phased_test` | Sweeps load low → high → low to cross hysteresis thresholds. |
+| `hy_oscillate_test` | Alternates load in a square wave to test ping-pong suppression. |
+| `hy_nodrain_test` | Verifies in-flight mode changes under `SWITCH_POLICY = 1`. |
+| `hy_compare_test` | Sweeps load across multiple steps to measure latency and switches. |
+| `hy_patterns_all_test` | Executes all traffic patterns under heavy load. |
+| `hy_lengths_test` | Transmits packets with lengths between 2 and 16 flits. |
+| `hy_loopback_test` | Sends packets where source equals destination. |
+| `hy_bubble_test` | Injects packets with intra-packet delays and stalled sinks. |
+| `hy_backpressure_test` | Dynamically changes sink ready behaviour during transmission. |
+| `hy_watchdog_test` | Simulates an unacknowledged source to verify `ERROR` timeout. |
+| `hy_reset_test` | Applies reset during active packet transmission. |
+| `hy_regress_test` | Runs the complete sequence of tests in a single simulation. |
 
 ---
 
-## 5. Test catalogue (`tb/tests/hy_tests_pkg.sv`)
+## 6. Verification procedure
 
-| Test | Purpose |
-|---|---|
-| `hy_smoke_test` | one packet, corner to corner (0 → 15) |
-| `hy_zero_load_test` | latency is exactly `distance + 4` into an empty network (`+HY_ALLPAIRS=1` for all 240 flows) |
-| `hy_all_pairs_test` | every node → every other node |
-| `hy_flow_test` | 200 packets of one flow (ordering, integrity) |
-| `hy_uniform_test` / `hy_hotspot_test` / `hy_transpose_test` / `hy_pattern_test` | pattern × load/cycles via plusargs (`+HY_PAT=`) |
-| `hy_phased_test` | low → high → low load (guaranteed band crossings) |
-| `hy_oscillate_test` | square-wave load — many threshold crossings; the ping-pong exerciser |
-| `hy_nodrain_test` | oscillate + *requires* a mode change with flits in flight (policy 1) |
-| `hy_compare_test` | one configuration over a load sweep (latency/throughput/switch comparison) |
-| `hy_patterns_all_test` | every pattern at a heavy load |
-| `hy_lengths_test` | packet lengths 2..16 (beyond the 4-flit contract) |
-| `hy_loopback_test` | src == dst (beyond the contract) |
-| `hy_bubble_test` | gaps inside packets + 60%-ready random sinks |
-| `hy_backpressure_test` | sink behaviour changes while traffic runs |
-| `hy_watchdog_test` | a source never acknowledges → ERROR state required (policy 0 only; reported as skipped under policy 1) |
-| `hy_reset_test` | reset mid-traffic, twice |
-| `hy_regress_test` | all of the above, sequenced in one simulation |
+1. Write sequences in `tb/seq/`.
+2. Add new test classes in `tb/tests/hy_tests_pkg.sv` by extending `hy_base_test`.
+3. Read configuration knobs through `plus("HY_LOAD", 100)` instead of fixed constants.
+4. Set `cfg.expect_drain_timeout = 1` for tests that intentionally trigger watchdogs.
+5. Set `cfg.require_inflight_switch = 1` for tests that require in-flight mode switches.
+6. Execute the test using `./scripts/run_uvm.sh`.
 
 ---
 
-## 6. Adding a test
+## 7. Sign-off checklist
 
-1. Add a sequence (or a virtual sequence) in `tb/seq/`.
-2. Add a test class in `tb/tests/hy_tests_pkg.sv` extending `hy_base_test`; override `configure(hy_cfg)` *before* the environment is built (checker switches, sink modes) and `run_body()` to start sequences on `env.vseqr`.
-3. Read knobs with `plus("HY_LOAD", 100)` etc. — never hard-code them into the test.
-4. If the test provokes the watchdog, set `cfg.expect_drain_timeout = 1`; if it must observe an in-flight no-drain switch, set `cfg.require_inflight_switch = 1`.
-5. Run it through `scripts/run_uvm.sh`; the UVM severity count is the verdict.
-
-## 7. Sign-off checklist (before claiming a design point clean)
-
-- [ ] `hy_smoke_test`, `hy_zero_load_test`, `hy_all_pairs_test` green (data path + routing legality)
-- [ ] `hy_oscillate_test` green on *both* policies and, for the claim, on the conventional-hybrid parameterisation (`--dual 0 --ewma 0`)
-- [ ] `hy_nodrain_test` green (in-flight switch observed) under `SWITCH_POLICY=1`
-- [ ] `hy_watchdog_test` green under `SWITCH_POLICY=0` **and** reports `ERROR` (not a hang)
-- [ ] `hy_reset_test` + `hy_regress_test` green
-- [ ] Coverage: mode × band bins hit (especially the *inside-the-band* bin with an oscillating signal, which is the entire point of the work)
-- [ ] `performance_monitor` numbers saved per configuration for the experiment table ([experiments.md](experiments.md))
+Before marking a configuration complete, confirm:
+- [ ] `hy_smoke_test`, `hy_zero_load_test`, and `hy_all_pairs_test` pass without errors.
+- [ ] `hy_oscillate_test` passes under both policies (`SWITCH_POLICY = 0` and `1`).
+- [ ] `hy_nodrain_test` passes and observes an in-flight switch under `SWITCH_POLICY = 1`.
+- [ ] `hy_watchdog_test` reaches the `ERROR` state safely without hanging under `SWITCH_POLICY = 0`.
+- [ ] `hy_reset_test` and `hy_regress_test` complete successfully.
+- [ ] Functional coverage bins for modes, threshold bands, and patterns are covered.
+- [ ] Performance metrics match expected values in [docs/experiments.md](experiments.md).

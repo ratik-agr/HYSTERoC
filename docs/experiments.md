@@ -1,74 +1,97 @@
-# Experiments — evaluation protocol
+# Experiments — Evaluation Protocol
 
-This document defines how a HYSTERoC result is produced so that two runs are comparable. The *claims* live in the [README](../README.md) §2.3; this is the protocol.
+This document defines the evaluation methodology for HYSTERoC. Follow this protocol to produce comparable experimental results across different runs.
 
 ---
 
 ## 1. Configuration points
 
-Always run the full ablation matrix for any claimed result. `DUAL=1, USE_EWMA=1, THIGH=160, TLOW=96` (defaults in `tb/env/test.sv`) is HYSTERoC.
+Evaluate the complete ablation matrix for all reported experimental data. The default configuration in `tb/env/test.sv` represents HYSTERoC (`DUAL=1, USE_EWMA=1, THIGH=160, TLOW=96`).
 
-| # | Name | `DUAL` | `USE_EWMA` | Thresholds | `SWITCH_POLICY` |
-|---|---|---|---|---|---|
-| 0 | XY-only reference | — | — | `XY_ONLY=1` | 0 |
-| 1 | **HYSTERoC** | 1 | 1 | THIGH=160, TLOW=96 | 0 |
-| 2 | Ablation B | 1 | 0 | THIGH=160, TLOW=96 | 0 |
-| 3 | Ablation A | 0 | 1 | THRESH_SINGLE=128 | 0 |
-| 4 | Conventional hybrid | 0 | 0 | THRESH_SINGLE=128 | 0 |
-| 1′ / 2′ | HYSTERoC / Ablation B, no-drain | 1 | 1 (0) | THIGH=160, TLOW=96 | **1** (`DET_VARIANT` = 0, 1, 2 reported separately) |
+| # | Name | `DUAL` | `USE_EWMA` | Thresholds | `SWITCH_POLICY` | Evaluation Purpose |
+|---|---|---|---|---|---|---|
+| 0 | XY reference | — | — | `XY_ONLY=1` | 0 | Baseline deterministic routing without adaptation. |
+| 1 | **HYSTERoC** | 1 | 1 | THIGH=160, TLOW=96 | 0 | The proposed hysteresis architecture. |
+| 2 | Ablation B | 1 | 0 | THIGH=160, TLOW=96 | 0 | Dual thresholds on raw signals (isolates filtering). |
+| 3 | Ablation A | 0 | 1 | THRESH_SINGLE=128 | 0 | Single threshold on filtered signals (isolates hysteresis). |
+| 4 | Conventional hybrid | 0 | 0 | THRESH_SINGLE=128 | 0 | Conventional hybrid baseline. |
+| 1′ | HYSTERoC no-drain | 1 | 1 | THIGH=160, TLOW=96 | 1 | FPGA-friendly variant without drain delays (`DET_VARIANT` = 0, 1, 2). |
 
-Reading: **1 vs 4** is the headline claim; **1 vs 2** isolates filtering; **1 vs 3** isolates the hysteresis band; **1′** is the FPGA-friendly variant (report its switch count and latency separately — the non-adaptive mode is deterministic Odd–Even, not XY).
+Comparison objectives:
+* Compare **Point 1 against Point 4** to demonstrate the primary benefit of HYSTERoC.
+* Compare **Point 1 against Point 2** to evaluate EWMA filter performance.
+* Compare **Point 1 against Point 3** to evaluate the dual-threshold hysteresis band.
+* Report **Point 1′** separately to show the throughput benefit of the no-drain variant.
+
+---
 
 ## 2. Workloads
 
-| Workload | Plusargs | Purpose |
+| Workload | Options and Flags | Purpose |
 |---|---|---|
-| uniform | `--pat 0` uniform test, load sweep | baseline sustained congestion |
-| hotspot | `--pat 1` | concentrated congestion (max-of-16 signal exercised) |
-| transpose | `--pat 2` | structured permutation |
-| complement | `--pat 3` | worst-case XY paths |
-| neighbour | `--pat 4` | minimal-hop traffic |
-| oscillating (square wave) | `hy_oscillate_test --load 400 --cycles 300` | **the** ping-pong criterion: sustained threshold crossings |
-| phased (low→high→low) | `hy_phased_test --load 350` | hysteresis band traversal, both directions |
-| load sweep | `hy_compare_test --lo 100 --hi 350 --step 25 --dwell 2000` | one configuration, many loads; plot latency & throughput vs load |
-| all patterns | `hy_patterns_all_test --load 250` | no pattern-specific pathology |
-| zero-load | `hy_zero_load_test` | latency floor = distance + 4 (check before sweeping) |
+| Uniform | `--pat 0` with load sweep | Measures baseline sustained traffic. |
+| Hotspot | `--pat 1` | Exercises maximum congestion detection across nodes. |
+| Transpose | `--pat 2` | Measures structured permutation traffic. |
+| Complement | `--pat 3` | Stresses longest-path routing in the mesh. |
+| Neighbour | `--pat 4` | Evaluates single-hop nearest-neighbour traffic. |
+| Oscillating (square wave) | `hy_oscillate_test --load 400 --cycles 300` | Tests ping-pong reduction under oscillating congestion. |
+| Phased (low → high → low) | `hy_phased_test --load 350` | Tests transitions across hysteresis thresholds in both directions. |
+| Load sweep | `hy_compare_test --lo 100 --hi 350 --step 25 --dwell 2000` | Measures latency and throughput across offered load levels. |
+| All patterns | `hy_patterns_all_test --load 250` | Verifies stability across all traffic patterns. |
+| Zero load | `hy_zero_load_test` | Confirms minimum latency equals `distance + 4`. |
 
-Loads are in per-mille flits/node/cycle (`--load 400` = 0.4). State every load in both units.
+Specify loads in units of per-mille flits per node per cycle (`--load 400` equals 0.4 flits/node/cycle).
 
-## 3. Metrics to report (from `performance_monitor`)
+---
 
-| Metric | Signal | Why |
+## 3. Reported metrics (`performance_monitor`)
+
+Record these metrics from the `performance_monitor` module:
+
+| Metric | Signal Name | Description |
 |---|---|---|
-| Completed switches | `w_switches` (split `w_to_adapt` / `w_to_xy`) | the headline HYSTERoC-vs-baseline number |
-| **Ping-pong events** | `w_pp0…w_pp3` (dwell ≤ 50/100/200/400) | the failure mode being fixed; report pp100 and pp200 at minimum |
-| Dwell time | `w_dwell_sum/cnt/min/max` | is the controller actually dwelling in each mode? |
-| Blocked cycles + fraction | `w_blocked`, `w_blocked / measure` | transition overhead as a throughput loss |
-| Drain length | `drain_cnt/sum/min/max` | worst-case injection stall per switch |
-| Packet latency | mean/std/max of total and network latency | `w_lat_*` + exact percentiles from the testbench packet log |
-| Throughput | `w_inj_flits` / `w_ej_flits` in the window | must be ≥ baseline at equal latency, not just fewer switches |
-| Stall watchdog | `stall_max` | empirical liveness evidence (not a proof — say so) |
+| Completed switches | `w_switches` (`w_to_adapt`, `w_to_xy`) | Total count of completed mode transitions. |
+| Ping-pong events | `w_pp0` to `w_pp3` | Switches occurring within 50, 100, 200, or 400 cycles of previous switch. |
+| Dwell time | `w_dwell_sum`, `min`, `max` | Duration the network remains in a mode before switching. |
+| Blocked cycles | `w_blocked` | Cycles during which `inject_block_req` is asserted. |
+| Blocked fraction | `w_blocked / measure` | Proportion of measurement window lost to drain blocks. |
+| Drain duration | `drain_cnt`, `sum`, `min`, `max` | Cycles needed to drain all packets before switching. |
+| Packet latency | `w_lat_*` | Mean, standard deviation, and maximum total and network latency. |
+| Delivered throughput | `w_ej_flits` | Flits accepted at ejection sinks within measurement window. |
+| Stall watchdog | `stall_max` | Maximum consecutive cycles with in-flight packets and zero deliveries. |
 
-Report **rate-relative** numbers too: switches per 1000 packets, blocked fraction, ping-pong per 1000 switches.
+Always calculate rate-relative values:
+* Switches per 1,000 delivered packets.
+* Injection-blocked time fraction.
+* Ping-pong events per 1,000 mode switches.
 
-## 4. Statistics
+---
 
-* Run each (configuration, workload) point at **≥ 3 seeds** (the `traffic_generator` PRNG differs per seed in the bench flow; the UVM randomized sequences differ run-to-run) and report mean ± range.
-* Keep the measurement window *after* warmup (`warmup`/`measure` in `performance_monitor` parameters); never measure across a transition burst.
-* For the oscillating workload, additionally record the congestion signal trajectory (`global_congestion`/`global_raw`, `tb/iface/hy_if` taps) so the band-crossing argument is visible, not just the switch count.
+## 4. Statistical methodology
 
-## 5. Reproducibility checklist (attach to every result table)
+* Execute each configuration with **at least three distinct random seeds**. Report mean values and error ranges.
+* Exclude the warmup period from all reported statistics. Measure only during the configured measurement window.
+* For oscillating workloads, log the congestion trajectories (`global_congestion` and `global_raw`) to show band crossings.
 
-- [ ] Commit SHA (+ `git status` clean) and `sim/` file lists used
-- [ ] Simulator + version; DUT parameterization (`policy/det/dual/ewma/thigh/tlow/xy-only`)
-- [ ] Test name and every plusarg, incl. `--load/--cycles/--pat/--timeout`
-- [ ] Seed(s), warmup/measure cycles, number of repetitions
-- [ ] `performance_monitor` raw counters (not just derived means)
-- [ ] Unexpected ERROR / timeout / watchdog state: reported, never omitted
+---
 
-## 6. What would make the evaluation convincing
+## 5. Reproducibility checklist
 
-1. The headline comparison (1 vs 4) on the oscillating workload: **fewer switches and fewer ping-pong events at equal-or-better latency and throughput.** Fewer switches with worse latency is a failed claim, not a result.
-2. The ablation ordering (2 and 3 between 1 and 4, in the direction predicted by §1) — a result where disabling either mechanism beats the full design is a bug or a mis-calibrated threshold, not a finding.
-3. Policy 1′ at its best `DET_VARIANT` with the in-flight switch requirement observed (`hy_nodrain_test` green) — no drain stalls, comparable switch behaviour.
-4. The watchdog test proving failure is *safe* (ERROR, no forced switch) under a misbehaving source.
+Include these details in all reported experiment summaries:
+- [ ] Git commit SHA and status of working tree.
+- [ ] Simulator version and synthesis/compilation flags.
+- [ ] Top-level parameters (`policy`, `det`, `dual`, `ewma`, `thigh`, `tlow`).
+- [ ] Test name and all plusarg parameters (`+HY_LOAD=`, `+HY_CYCLES=`, `+HY_PAT=`).
+- [ ] Random seed values, warmup length, and measurement length.
+- [ ] Raw performance counter values from `performance_monitor`.
+- [ ] Status of watchdog alerts or error indicators.
+
+---
+
+## 6. Evaluation success criteria
+
+A successful experimental evaluation must show:
+1. **Fewer switches and fewer ping-pong events** for HYSTERoC compared to the conventional hybrid baseline at equal or better latency and throughput.
+2. **Predictable ablation trends**: Point 2 and Point 3 must perform between Point 1 and Point 4.
+3. **No-drain efficiency**: Point 1′ must eliminate drain delays while maintaining safe packet routing.
+4. **Safe timeout recovery**: The watchdog test must transition cleanly to `ERROR` without deadlock when sources stall.

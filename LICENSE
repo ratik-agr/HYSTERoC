@@ -1,4 +1,6 @@
-Copyright (c) 2026 the HYSTERoC project contributors
+MIT License
+
+Copyright (c) 2026 HYSTERoC Project Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -17,8 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
-
-Note for academic use: if you use this research prototype in a paper or thesis,
-please cite the project and the specific configuration point evaluated (see
-README.md, Section 10). Redistribution and commercial use: discuss with the
-repository owner.
